@@ -1,0 +1,20 @@
+name: Actions runner availability probe
+
+on:
+  push:
+    branches:
+      - codex/actions-runner-probe-20261021
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  runner-probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Confirm Runner execution without accessing course data
+        shell: bash
+        run: |
+          printf '%s\n' 'ACTION_RUNNER_PROBE_OK'
+          printf '%s\n' 'No checkout, secrets, course access, email, or data-branch writes.'
