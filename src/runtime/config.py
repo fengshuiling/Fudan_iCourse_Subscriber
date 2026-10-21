@@ -1,7 +1,7 @@
 import os
 
-STUDENT_ID = os.environ.get("StuId", "")
-PASSWORD = os.environ.get("UISPsw", "")
+STUDENT_ID = os.environ.get("STUID") or os.environ.get("StuId", "")
+PASSWORD = os.environ.get("UISPSW") or os.environ.get("UISPsw", "")
 
 WEBVPN_BASE = "https://webvpn.fudan.edu.cn"
 IDP_BASE = "https://id.fudan.edu.cn"

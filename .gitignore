@@ -6,6 +6,8 @@ data/*
 *.mp4
 *.wav
 tests/
+.venv/
+.cache/
 
 # ASR models (downloaded at runtime)
 sherpa-onnx-sense-voice-*/
@@ -42,6 +44,7 @@ _backup_reencrypted.gz.enc
 docs/*
 !docs/*.png
 !docs/frontend-readme.md
+!docs/circleci.md
 docs/specs/
 *.mp3
 bugs.md

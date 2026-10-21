@@ -19,6 +19,7 @@ import time
 import traceback
 
 from src.runtime import config
+from src.runtime import run_budget
 from src.data.database import Database
 from src.api.emailer import Emailer
 from src.api.icourse import ICourseClient
@@ -76,6 +77,9 @@ def _enumerate_lectures(client: ICourseClient, db: Database,
     course boundaries when picking the "next" lecture."""
     out: list[tuple[str, str, dict]] = []
     for course_id in config.COURSE_IDS:
+        if run_budget.exhausted():
+            reporter.info("[Budget] Deferring remaining courses until the next run.")
+            break
         try:
             _check_session(client)
             detail = client.get_course_detail(course_id)
@@ -146,7 +150,8 @@ def _drive_lectures(client: ICourseClient, db: Database,
     entering the loop; subsequent prefetches are kicked off from inside
     each LectureRunner.run via ``next_info``.
     """
-    if not all_lectures:
+    all_lectures = run_budget.lecture_batch(all_lectures)
+    if not all_lectures or run_budget.exhausted():
         return
 
     first_course, _, first_lec = all_lectures[0]
@@ -157,6 +162,9 @@ def _drive_lectures(client: ICourseClient, db: Database,
     )
 
     for i, (course_id, course_title, lecture) in enumerate(all_lectures):
+        if run_budget.exhausted():
+            reporter.info("[Budget] Deferring remaining lectures until the next run.")
+            break
         sub_id = str(lecture["sub_id"])
         next_info: tuple[str, str] | None = None
         if i + 1 < len(all_lectures):
@@ -241,6 +249,9 @@ def _crawl_semester_catalog(client: ICourseClient, db: Database,
                   f"{', '.join(t['name'] for t in terms)}")
 
     for term_info in terms:
+        if run_budget.exhausted():
+            reporter.info("[Budget] Deferring remaining catalogs until the next run.")
+            break
         code = term_info["code"]
         name = term_info["name"]
         expected = term_info["count"]
