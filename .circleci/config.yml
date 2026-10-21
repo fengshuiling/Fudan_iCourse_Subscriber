@@ -1,0 +1,146 @@
+version: 2.1
+
+# GitHub App schedules are configured in CircleCI Project Settings >
+# Project Setup, NOT workflows.triggers. Use UTC cron: 36 11 * * *
+# (19:36 Asia/Shanghai), config/checkout branch main, run_course_check=true.
+# See docs/circleci.md before enabling either runtime opt-in switch.
+parameters:
+  run_course_check:
+    type: boolean
+    default: false
+  verify_database:
+    type: boolean
+    default: false
+
+executors:
+  python-small:
+    docker:
+      - image: cimg/python:3.12.15
+    resource_class: small
+    working_directory: ~/project
+
+jobs:
+  offline-checks:
+    executor: python-small
+    steps:
+      - checkout
+      - run:
+          name: Check Python syntax and database safety (synthetic data only)
+          command: |
+            python -m pip install pycryptodome PyYAML
+            python -m compileall -q main.py src scripts
+            python -m unittest discover -s ci_tests -v
+
+  verify-database:
+    executor: python-small
+    steps:
+      - checkout
+      - run:
+          name: Read and decrypt history without crawling or publishing
+          command: |
+            python -m pip install pycryptodome
+            python scripts/circleci_pipeline.py verify
+          no_output_timeout: 15m
+
+  course-check:
+    docker:
+      - image: cimg/python:3.12.15
+    resource_class: medium # 2 vCPU / 4 GB; one process, no parallel jobs
+    working_directory: ~/project
+    environment:
+      TZ: Asia/Shanghai
+      PYTHONUNBUFFERED: "1"
+      DATA_DIR: data
+      DB_PATH: data/icourse.db
+      ASR_NUM_THREADS: "2"
+      OCR_MAX_WORKERS: "1"
+      OCR_MAX_TARGET: "1"
+      OCR_NUM_THREADS: "1"
+      IMAGE_WORKERS: "4"
+      VIDEO_DOWNLOAD_CONCURRENCY: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      ICOURSE_MAX_LECTURES: "2"
+      ASR_MODEL_DIR: .cache/icourse-models/sensevoice
+      SILERO_VAD_PATH: .cache/icourse-models/silero_vad.onnx
+    retention:
+      caches: "15d"
+    steps:
+      - run:
+          name: Start total job budget before checkout and installation
+          command: echo "export ICOURSE_JOB_STARTED_AT=$(date +%s)" >> "$BASH_ENV"
+      - checkout
+      - run:
+          name: Require explicit opt-in and check environment before downloads
+          command: python scripts/circleci_pipeline.py preflight
+      - run:
+          name: Install FFmpeg and OCR system libraries
+          command: |
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends ffmpeg libgl1 libglib2.0-0
+      - restore_cache:
+          keys:
+            - icourse-venv-v1-py31215-{{ arch }}-{{ checksum "requirements.txt" }}
+      - run:
+          name: Install Python and bundled RapidOCR models
+          command: |
+            test -x .venv/bin/python || python -m venv .venv
+            .venv/bin/python -m pip install --no-cache-dir -r requirements.txt
+      - save_cache:
+          key: icourse-venv-v1-py31215-{{ arch }}-{{ checksum "requirements.txt" }}
+          paths:
+            - .venv
+      - restore_cache:
+          keys:
+            - icourse-sensevoice-int8-20240717-v1-{{ arch }}
+      - run:
+          name: Prepare ASR, VAD and OCR without accessing courses
+          command: |
+            bash .circleci/install_models.sh
+            .venv/bin/python -c 'from src.ai.ocr import _get_engine; _get_engine(); print("RapidOCR ready")'
+          no_output_timeout: 15m
+      - save_cache:
+          key: icourse-sensevoice-int8-20240717-v1-{{ arch }}
+          paths:
+            - .cache/icourse-models
+      - run:
+          name: Load history, run existing pipeline, merge and publish encrypted data
+          command: .venv/bin/python -u scripts/circleci_pipeline.py execute
+          no_output_timeout: 15m
+      # Intentionally no data cache, workspace or artifacts: these contain
+      # decrypted course data. Failed/cancelled runs never publish.
+
+workflows:
+  validate:
+    when:
+      and:
+        - not: << pipeline.parameters.run_course_check >>
+        - not: << pipeline.parameters.verify_database >>
+    jobs:
+      - offline-checks:
+          filters:
+            branches:
+              ignore: data
+  verify-history:
+    when:
+      and:
+        - << pipeline.parameters.verify_database >>
+        - not: << pipeline.parameters.run_course_check >>
+    jobs:
+      - verify-database:
+          filters:
+            branches:
+              only: main
+  daily-course-check:
+    when:
+      and:
+        - << pipeline.parameters.run_course_check >>
+        - not: << pipeline.parameters.verify_database >>
+    jobs:
+      - course-check:
+          serial-group: << pipeline.project.slug >>/icourse-data
+          filters:
+            branches:
+              only: main
