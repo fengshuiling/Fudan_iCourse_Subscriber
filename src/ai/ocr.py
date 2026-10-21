@@ -7,7 +7,6 @@ so we load ONE recognizer per process and let multiple threads call it.
 from __future__ import annotations
 
 import io
-import os
 import threading
 from dataclasses import dataclass
 
@@ -23,13 +22,7 @@ def _get_engine() -> RapidOCR:
     if _engine is None:
         with _lock:
             if _engine is None:
-                options = {}
-                threads = os.environ.get("OCR_NUM_THREADS")
-                if threads:
-                    if int(threads) < 1:
-                        raise ValueError("OCR_NUM_THREADS must be positive")
-                    options = {"intra_op_num_threads": int(threads), "inter_op_num_threads": 1}
-                _engine = RapidOCR(**options)
+                _engine = RapidOCR()
     return _engine
 
 

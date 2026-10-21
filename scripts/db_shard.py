@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bidirectional DB shard CLI used by CI workflows.
+"""Bidirectional DB shard CLI used by GitHub Actions workflows.
 
 Usage:
     python scripts/db_shard.py shard      <db_path>    <output_dir>
