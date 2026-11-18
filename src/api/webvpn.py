@@ -329,7 +329,20 @@ class WebVPNSession:
 
         login_token = data.get("loginToken", "")
         if not login_token:
-            raise RuntimeError("No loginToken in iCourse CAS response")
+            # Diagnostic metadata only. Never log response values, which
+            # may contain credentials, tokens, or personal information.
+            nested = data.get("data")
+            nested_keys = (
+                sorted(str(k) for k in nested.keys())
+                if isinstance(nested, dict) else []
+            )
+            raise RuntimeError(
+                "No loginToken in iCourse CAS response "
+                f"(HTTP {resp.status_code}; top-level keys="
+                f"{sorted(str(k) for k in data.keys())}; "
+                f"data type={type(nested).__name__}; "
+                f"data keys={nested_keys})"
+            )
         print("    loginToken: OK")
 
         # Step 6: Get CAS ticket (through WebVPN)
