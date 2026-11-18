@@ -7,8 +7,10 @@ Handles:
 """
 
 import html as html_mod
+import hmac
 import re
-from binascii import hexlify, unhexlify
+import time
+from binascii import Error as Base32Error, hexlify, unhexlify
 from urllib.parse import urlparse, urlencode, quote, urljoin
 
 import requests
@@ -18,6 +20,29 @@ from Crypto.Cipher import PKCS1_v1_5
 import base64
 
 from src.runtime import config
+
+
+class SecondFactorError(RuntimeError):
+    """Stop automatic password retries when a second factor needs attention."""
+
+
+def totp_code(secret: str, timestamp: float | None = None) -> str:
+    """Generate a six-digit, 30-second HMAC-SHA1 TOTP (RFC 6238)."""
+    normalized = "".join(secret.split()).upper().rstrip("=")
+    if not normalized:
+        raise SecondFactorError(
+            "Set UIS_TOTP_SECRET to the account's bound TOTP secret "
+            "(a repository secret when running in GitHub Actions)"
+        )
+    try:
+        key = base64.b32decode(normalized + "=" * (-len(normalized) % 8))
+    except (Base32Error, ValueError):
+        raise SecondFactorError("UIS_TOTP_SECRET must be a Base32 TOTP secret") from None
+    counter = int((time.time() if timestamp is None else timestamp) // 30)
+    digest = hmac.digest(key, counter.to_bytes(8, "big"), "sha1")
+    offset = digest[-1] & 0x0F
+    number = int.from_bytes(digest[offset:offset + 4], "big") & 0x7FFFFFFF
+    return f"{number % 1_000_000:06d}"
 
 
 def encrypt_host(hostname: str) -> str:
@@ -182,13 +207,20 @@ class WebVPNSession:
         password = password or config.PASSWORD
 
         print("[*] Starting iCourse CAS authentication through WebVPN...")
+
+        # Pre-flight: probe the WebVPN portal.  A cold session redirects to
+        # /login instantly (status 302); a hot session returns 200.  Fail
+        # fast on cold — login_with_retry() in main.py will re-login.
+        warmup = self.session.get(
+            config.WEBVPN_BASE + "/", allow_redirects=False, timeout=5,
+        )
+        if warmup.status_code != 200:
+            raise RuntimeError("WebVPN session cold — re-login needed")
+
         idp_vpn_base = get_vpn_url(config.IDP_BASE)
 
-        # Step 1: Initiate CAS login via casapi
-        # This is equivalent to clicking "校内用户登录" in the browser.
-        # casapi will 302-redirect to IDP with the correct service URL:
-        #   service=https://icourse.fudan.edu.cn/casapi/index.php
-        #          ?forward=https%3A%2F%2Ficourse.fudan.edu.cn%2F&r=auth/login
+        # Step 1: Initiate CAS login via casapi.  Use allow_redirects=True
+        # so requests follows the full redirect chain like a browser.
         print("[1/7] Initiating CAS login via casapi...")
         casapi_url = (
             f"{config.ICOURSE_BASE}/casapi/index.php"
@@ -198,54 +230,23 @@ class WebVPNSession:
         )
         vpn_url = get_vpn_url(casapi_url)
 
-        # Follow redirect chain to reach IDP login page and extract lck.
-        # The CAS gateway intermittently returns a 200 interstitial or a
-        # 302 to a `/login`-shaped page right after a successful WebVPN
-        # login.  Both are transient — chase the full redirect chain (lck
-        # often appears mid-chain even when an intermediate hop looks
-        # like a stale-session bounce) and retry a few times before
-        # letting login_with_retry() waste a full WebVPN re-login.
-        import time as _time
+        resp = self.session.get(vpn_url, allow_redirects=True, timeout=60)
         lck = None
-        last_locations: list[str] = []
-        for cas_attempt in range(3):
-            if cas_attempt > 0:
-                _time.sleep(2)
-                print(f"    CAS lck extract retry {cas_attempt}/2...")
-            resp = self.session.get(vpn_url, allow_redirects=False, timeout=60)
-            last_locations = []
-            for _ in range(15):
-                location = resp.headers.get("Location", "")
-                if resp.status_code not in (301, 302, 303, 307) or not location:
-                    break
-                last_locations.append(location)
-                lck_match = re.search(r'lck=([^&#"]+)', location)
-                if lck_match:
-                    lck = lck_match.group(1)
-                    break
-                if not location.startswith("http"):
-                    location = urljoin(resp.url, location)
-                resp = self.session.get(
-                    location, allow_redirects=False, timeout=60
-                )
-            if lck:
-                break
-            # Check final response for lck embedded in HTML
-            for source in [resp.url, resp.text[:5000],
-                           str(getattr(resp, 'history', []))]:
-                m = re.search(r'lck=([^&#"]+)', source)
-                if m:
-                    lck = m.group(1)
-                    break
-            if lck:
+        for source in [resp.url] + [
+            h.headers.get("Location", "") for h in (resp.history or [])
+        ]:
+            m = re.search(r'lck=([^&#"]+)', source)
+            if m:
+                lck = m.group(1)
                 break
         if not lck:
-            # Log the redirect trail so future failures are diagnosable
-            # without re-running with extra prints.
-            trail = " -> ".join(last_locations[-3:]) if last_locations else "<no redirects>"
+            m = re.search(r'lck=([^&#"]+)', resp.text[:5000])
+            if m:
+                lck = m.group(1)
+        if not lck:
             raise RuntimeError(
                 f"Failed to extract lck from CAS redirect chain "
-                f"(status={resp.status_code}, last hops: {trail})"
+                f"(final URL: {resp.url[:120]})"
             )
 
         entity_id = config.ICOURSE_BASE
@@ -327,6 +328,10 @@ class WebVPNSession:
                 f"iCourse CAS auth failed (code={data.get('code')})"
             )
 
+        if data.get("second"):
+            data = self._authenticate_totp(
+                data, student_id, lck, entity_id, request_type, via_vpn=True
+            )
         login_token = data.get("loginToken", "")
         if not login_token:
             raise RuntimeError("No loginToken in iCourse CAS response")
@@ -552,12 +557,76 @@ class WebVPNSession:
             )
 
         # loginToken is at top level, not nested under "data"
+        if data.get("second"):
+            data = self._authenticate_totp(
+                data, student_id, lck, entity_id, request_type
+            )
         login_token = data.get("loginToken", "")
         if not login_token:
             raise RuntimeError("No loginToken in response")
 
         print("    loginToken: OK")
         return login_token
+
+    def _authenticate_totp(
+        self,
+        challenge: dict,
+        student_id: str,
+        lck: str,
+        entity_id: str,
+        request_type: str,
+        *,
+        via_vpn: bool = False,
+    ) -> dict:
+        """Continue a password challenge using the offered OTP module."""
+        if "userAndOtp" not in (challenge.get("moduleCodes") or []):
+            raise SecondFactorError(
+                "Unified authentication requires a second factor but does not offer TOTP"
+            )
+        if not challenge.get("requestNumber") or not challenge.get("authChainCode"):
+            raise SecondFactorError("TOTP challenge is missing its authentication context")
+        code = totp_code(config.TOTP_SECRET)
+        base = get_vpn_url(config.IDP_BASE) if via_vpn else config.IDP_BASE
+        origin = config.WEBVPN_BASE if via_vpn else config.IDP_BASE
+        print("[Login] TOTP second factor...")
+        try:
+            resp = self.session.post(
+                f"{base}/idp/authn/authExecute",
+                json={
+                    "authModuleCode": "userAndOtp",
+                    "authChainCode": challenge["authChainCode"],
+                    "entityId": entity_id,
+                    "requestNumber": challenge["requestNumber"],
+                    "requestType": request_type,
+                    "lck": lck,
+                    "authPara": {
+                        "loginName": challenge.get("userName") or student_id,
+                        "otpCode": code,
+                    },
+                },
+                headers={
+                    "Content-Type": "application/json",
+                    "Referer": f"{base}/ac/",
+                    "Origin": origin,
+                },
+                timeout=60,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except (requests.RequestException, ValueError):
+            raise SecondFactorError(
+                "TOTP request failed; automatic login retries stopped"
+            ) from None
+        if not isinstance(data, dict) or str(data.get("code")) != "200":
+            raise SecondFactorError(
+                "TOTP authentication failed; check the bound secret and system clock"
+            )
+        if data.get("second") or not data.get("loginToken"):
+            raise SecondFactorError(
+                "TOTP did not finish authentication; an additional verification step is required"
+            )
+        print("[Login] TOTP OK")
+        return data
 
     def _get_cas_ticket(self, login_token: str) -> str:
         """Step 6: Exchange loginToken for a CAS ticket URL."""
@@ -597,15 +666,11 @@ class WebVPNSession:
         return ticket_url
 
     def _establish_session(self, ticket_url: str):
-        """Step 7: Follow the ticket URL to establish WebVPN session.
-
-        The WebVPN server can be very slow. We first try without following
-        redirects to capture the session cookie quickly, then verify.
-        """
+        """Step 7: Follow the ticket URL to establish WebVPN session."""
         for attempt in range(3):
             try:
                 resp = self.session.get(
-                    ticket_url, allow_redirects=True, timeout=90
+                    ticket_url, allow_redirects=True, timeout=20
                 )
                 if resp.status_code == 200:
                     print("    Session established.")
@@ -614,8 +679,6 @@ class WebVPNSession:
                     f"Failed to establish WebVPN session (status={resp.status_code})"
                 )
             except requests.exceptions.Timeout:
-                # Check if session was established despite timeout
-                # (server may have set cookies before the timeout)
                 has_ticket = any(
                     "wengine_vpn_ticket" in c.name
                     for c in self.session.cookies
