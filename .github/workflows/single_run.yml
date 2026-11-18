@@ -1,5 +1,5 @@
 name: Single Run
-# Isolated diagnostic run for Kant CAS authentication (no secret values logged)
+# One-off course 38819 check after user authenticated in their own browser
 
 on:
   push:
@@ -172,10 +172,11 @@ jobs:
         run: python -u main.py
 
       - name: Deploy database to data branch
-        if: always()
+        if: success()
         env:
           STUID: ${{ secrets.STUID }}
           UISPSW: ${{ secrets.UISPSW }}
+          SUBSCRIBED_COURSE_IDS: ${{ secrets.COURSE_IDS }}
           DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
