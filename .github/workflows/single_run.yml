@@ -1,4 +1,5 @@
 name: Single Run
+# Isolated diagnostic run for Kant CAS authentication (no secret values logged)
 
 on:
   push:
