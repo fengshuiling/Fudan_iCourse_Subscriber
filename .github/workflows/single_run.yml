@@ -1,6 +1,11 @@
 name: Single Run
 
 on:
+  push:
+    branches:
+      - "oneoff-kant-38819-20261118"
+    paths:
+      - ".github/workflows/single_run.yml"
   workflow_dispatch:
     inputs:
       course_ids:
@@ -156,7 +161,7 @@ jobs:
         env:
           StuId: ${{ secrets.STUID }}
           UISPsw: ${{ secrets.UISPSW }}
-          COURSE_IDS: ${{ inputs.course_ids }}
+          COURSE_IDS: ${{ github.event_name == 'push' && '38819' || inputs.course_ids }}
           DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           SMTP_EMAIL: ${{ secrets.SMTP_EMAIL }}
