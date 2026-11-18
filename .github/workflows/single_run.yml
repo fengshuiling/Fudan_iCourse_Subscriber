@@ -1,6 +1,11 @@
 name: Single Run
 
 on:
+  push:
+    branches:
+      - "oneoff-kant-upstream-20261118"
+    paths:
+      - ".github/workflows/single_run.yml"
   workflow_dispatch:
     inputs:
       course_ids:
@@ -162,8 +167,8 @@ jobs:
           StuId: ${{ secrets.STUID }}
           UISPsw: ${{ secrets.UISPSW }}
           UIS_TOTP_SECRET: ${{ secrets.UIS_TOTP_SECRET }}
-          COURSE_IDS: ${{ inputs.course_ids }}
-          USE_OFFICIAL_TRANSCRIPT: ${{ inputs.use_official_transcript && '1' || '' }}
+          COURSE_IDS: ${{ github.event_name == 'push' && '38819' || inputs.course_ids }}
+          USE_OFFICIAL_TRANSCRIPT: ${{ github.event_name == 'push' && '1' || (inputs.use_official_transcript && '1' || '') }}
           SMTP_EMAIL: ${{ secrets.SMTP_EMAIL }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           RECEIVER_EMAIL: ${{ secrets.RECEIVER_EMAIL }}
@@ -178,10 +183,11 @@ jobs:
           python -u main.py
 
       - name: Deploy database to data branch
-        if: always()
+        if: success()
         env:
           STUID: ${{ secrets.STUID }}
           UISPSW: ${{ secrets.UISPSW }}
+          SUBSCRIBED_COURSE_IDS: ${{ secrets.COURSE_IDS }}
           DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
